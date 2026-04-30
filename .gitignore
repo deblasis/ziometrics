@@ -1,0 +1,23 @@
+# Dependencies
+.zig-cache/
+zig-out/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.o
+*.obj
+*.lib
+*.exe
+*.dll
+*.so
+*.dylib
