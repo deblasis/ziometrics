@@ -311,3 +311,27 @@ test "Registry writePrometheus" {
     const output = stream.getWritten();
     try std.testing.expect(std.mem.indexOf(u8, output, "requests") != null);
 }
+
+test "Counter inc multiple" {
+    var c: Counter = .{};
+    c.inc();
+    c.inc();
+    c.inc();
+    try std.testing.expectEqual(@as(u64, 3), c.get());
+}
+
+test "Gauge negative tracking" {
+    var g: Gauge = .{};
+    g.set(10.0);
+    g.sub(20.0);
+    try std.testing.expectEqual(@as(f64, -10.0), g.get());
+}
+
+test "Histogram min max" {
+    var h: Histogram = .{};
+    h.observe(5.0);
+    h.observe(15.0);
+    h.observe(10.0);
+    try std.testing.expectEqual(@as(f64, 5.0), h.min);
+    try std.testing.expectEqual(@as(f64, 15.0), h.max);
+}
