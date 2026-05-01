@@ -1,66 +1,63 @@
 # ziometrics
 
-Metrics collection for Zig
+Metrics collection for Zig. Counters, gauges, histograms with Prometheus-compatible export.
 
-Metrics collection library for Zig. Counters, gauges, and histograms. Prometheus-compatible exposition format.
+Track application metrics with counters (monotonically increasing), gauges (up/down), and histograms (distribution). Registry for named metrics.
 
-## Features
+## Quick start
 
-- counters, gauges, histograms
-- Prometheus exposition format
-- label support
-- registry-based API
-
-## Quick Start
-
-```zig
-const ziometrics = @import("ziometrics");
-
-pub fn main() !void {
-    // See examples/ for runnable code
-}
-```
-
-## Installation
-
-Add to your `build.zig.zon`:
-
-```zig
-.{
-    .dependencies = .{
-        .ziometrics = .{ .url = "https://github.com/deblasis/ziometrics/archive/refs/heads/main.tar.gz", .hash = "..." },
-    },
-}
+```bash
+zig fetch --save git+https://github.com/deblasis/ziometrics
 ```
 
 Then in your `build.zig`:
 
 ```zig
-const ziometrics = b.dependency("ziometrics", .{
+const dep = b.dependency("ziometrics", .{
     .target = target,
     .optimize = optimize,
 });
-exe.root_module.addImport("ziometrics", ziometrics.module("ziometrics"));
+exe.root_module.addImport("ziometrics", dep.module("ziometrics"));
 ```
 
-## Examples
+Requires Zig 0.16.
 
-Run the included example:
+## Example output
 
-```bash
-zig build run-example
+`zig build run-example` produces:
+
+```
+=== ziometrics example ===
+
+Counters:
+  requests: 3
+  errors:   1
+
+Gauges:
+  cpu:      72.5%
+
+Histogram:
+  count=4 min=8.3 max=42.1 mean=21.5
 ```
 
-## API Reference
+See [examples/example.zig](examples/example.zig) for the source.
 
-See [src/ziometrics.zig](src/ziometrics.zig) for full documentation. All public symbols have doc comments.
+## API
+
+- `Registry(max).counter(name)` — named counter
+- `.gauge(name)` — named gauge
+- `.histogram(name)` — named histogram
+- `Counter.inc()` / `.add(n)` / `.get()` / `.reset()`
+- `Gauge.set(v)` / `.inc()` / `.dec()` / `.get()`
+- `Histogram.observe(value)` — record observation
+- `.count` / `.min` / `.max` / `.mean()` — distribution stats
 
 ## Compatibility
 
-- **Zig:** 0.16.0
-- **Platforms:** Linux, macOS, Windows
-- **Breaking changes:** Follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Minor versions may add features, patch versions fix bugs.
+- **Zig**: 0.16.0
+- **Platforms**: Linux, macOS, Windows
+- **Breaking changes**: follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Minor versions add features, patch versions fix bugs.
 
 ## License
 
-MIT
+MIT. Copyright (c) 2026 Alessandro De Blasis.
