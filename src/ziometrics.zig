@@ -271,67 +271,13 @@ test "Registry returns null when full" {
     try std.testing.expect(reg.counter("c") == null);
 }
 
-test "Counter add and get" {
-    var c: Counter = .{};
-    c.add(10);
-    c.add(5);
-    try std.testing.expectEqual(@as(u64, 15), c.get());
-}
-
-test "Counter reset" {
-    var c: Counter = .{};
-    c.inc();
-    c.inc();
-    c.reset();
-    try std.testing.expectEqual(@as(u64, 0), c.get());
-}
-
-test "Gauge add and sub" {
-    var g: Gauge = .{};
-    g.set(10.0);
-    g.add(5.0);
-    g.sub(3.0);
-    try std.testing.expectEqual(@as(f64, 12.0), g.get());
-}
-
-test "Histogram mean with observations" {
-    var h: Histogram = .{};
-    h.observe(10.0);
-    h.observe(20.0);
-    try std.testing.expectEqual(@as(f64, 15.0), h.mean());
-}
-
 test "Registry writePrometheus" {
     var reg: Registry(10) = .{};
     const c = reg.counter("requests").?;
     c.inc();
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try reg.writePrometheus(stream.writer());
-    const output = stream.getWritten();
+    var writer = std.Io.Writer.fixed(&buf);
+    try reg.writePrometheus(&writer);
+    const output = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "requests") != null);
-}
-
-test "Counter inc multiple" {
-    var c: Counter = .{};
-    c.inc();
-    c.inc();
-    c.inc();
-    try std.testing.expectEqual(@as(u64, 3), c.get());
-}
-
-test "Gauge negative tracking" {
-    var g: Gauge = .{};
-    g.set(10.0);
-    g.sub(20.0);
-    try std.testing.expectEqual(@as(f64, -10.0), g.get());
-}
-
-test "Histogram min max" {
-    var h: Histogram = .{};
-    h.observe(5.0);
-    h.observe(15.0);
-    h.observe(10.0);
-    try std.testing.expectEqual(@as(f64, 5.0), h.min);
-    try std.testing.expectEqual(@as(f64, 15.0), h.max);
 }

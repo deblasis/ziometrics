@@ -11,5 +11,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial release
 - counters, gauges, histograms
 - Prometheus exposition format
-- label support
 - registry-based API

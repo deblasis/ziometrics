@@ -24,7 +24,7 @@ zig build               - Build the library
 
 ## Architecture
 
-Single-file library with no external dependencies. All public symbols have doc comments.
+Single-file library with no external dependencies.
 
 ## Testing
 
