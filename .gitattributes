@@ -1,0 +1,2 @@
+# Keep line endings stable so zig fmt --check passes on Windows too.
+* text=auto eol=lf
