@@ -57,7 +57,7 @@ Requires Zig 0.16.
 - `Counter.inc()` / `.add(n)` / `.get()` / `.reset()`
 - `Gauge.set(v)` / `.inc()` / `.dec()` / `.get()`
 - `Histogram.observe(value)` / `.mean()` / `.min` / `.max`
-- `writePrometheus(writer)` — Prometheus text format
+- `writePrometheus(writer)` - Prometheus text format
 
 ## Compatibility
 
