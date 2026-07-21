@@ -5,57 +5,70 @@
 
 const std = @import("std");
 
-/// A monotonically increasing counter.
+/// A monotonically increasing counter. Thread-safe: increments are atomic, so
+/// concurrent handlers scraping the same counter cannot lose updates.
 pub const Counter = struct {
-    value: u64 = 0,
+    value: std.atomic.Value(u64) = .{ .raw = 0 },
 
     /// Increment by 1.
     pub fn inc(self: *Counter) void {
-        self.value += 1;
+        _ = self.value.fetchAdd(1, .monotonic);
     }
 
     /// Add a value.
     pub fn add(self: *Counter, n: u64) void {
-        self.value += n;
+        _ = self.value.fetchAdd(n, .monotonic);
     }
 
     /// Get current value.
     pub fn get(self: *const Counter) u64 {
-        return self.value;
+        return self.value.load(.monotonic);
     }
 
     /// Reset to zero (useful for tests).
     pub fn reset(self: *Counter) void {
-        self.value = 0;
+        self.value.store(0, .monotonic);
     }
 };
 
-/// A value that can go up and down.
+/// A value that can go up and down. Thread-safe: the f64 is stored as its bit
+/// pattern in an atomic word, so set/get are lock-free and add/sub use a
+/// compare-and-swap loop rather than a racy read-modify-write.
 pub const Gauge = struct {
-    value: f64 = 0,
+    bits: std.atomic.Value(u64) = .{ .raw = 0 },
 
     pub fn set(self: *Gauge, v: f64) void {
-        self.value = v;
+        self.bits.store(@bitCast(v), .monotonic);
+    }
+
+    fn rmw(self: *Gauge, delta: f64) void {
+        var cur = self.bits.load(.monotonic);
+        while (true) {
+            const next: u64 = @bitCast(@as(f64, @bitCast(cur)) + delta);
+            if (self.bits.cmpxchgWeak(cur, next, .monotonic, .monotonic)) |actual| {
+                cur = actual;
+            } else break;
+        }
     }
 
     pub fn inc(self: *Gauge) void {
-        self.value += 1;
+        self.rmw(1);
     }
 
     pub fn dec(self: *Gauge) void {
-        self.value -= 1;
+        self.rmw(-1);
     }
 
     pub fn add(self: *Gauge, v: f64) void {
-        self.value += v;
+        self.rmw(v);
     }
 
     pub fn sub(self: *Gauge, v: f64) void {
-        self.value -= v;
+        self.rmw(-v);
     }
 
     pub fn get(self: *const Gauge) f64 {
-        return self.value;
+        return @bitCast(self.bits.load(.monotonic));
     }
 };
 
@@ -82,6 +95,76 @@ pub const Histogram = struct {
         return self.count == 0;
     }
 };
+
+/// A Prometheus-conformant cumulative histogram with fixed upper bounds.
+///
+/// Unlike `Histogram` (which only tracks count/sum/min/max), this emits real
+/// `name_bucket{le="..."}` series through `+Inf`, plus `_sum` and `_count`, so
+/// `histogram_quantile()` works against a scrape. Bucket counts and the sum are
+/// atomic, so it is safe to observe from multiple request handlers at once.
+///
+/// `upper_bounds` must be ascending. Pass them as a comptime slice, e.g.
+/// `BucketedHistogram(&.{ 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10 })`.
+pub fn BucketedHistogram(comptime upper_bounds: []const f64) type {
+    return struct {
+        const Self = @This();
+        pub const bounds = upper_bounds;
+
+        comptime {
+            for (upper_bounds[1..], 0..) |b, i| {
+                if (b <= upper_bounds[i]) @compileError("BucketedHistogram bounds must be strictly ascending");
+            }
+        }
+
+        buckets: [upper_bounds.len]std.atomic.Value(u64) = @splat(.{ .raw = 0 }),
+        inf_count: std.atomic.Value(u64) = .{ .raw = 0 },
+        sum_bits: std.atomic.Value(u64) = .{ .raw = 0 },
+        total: std.atomic.Value(u64) = .{ .raw = 0 },
+
+        pub fn observe(self: *Self, value: f64) void {
+            _ = self.total.fetchAdd(1, .monotonic);
+            var cur = self.sum_bits.load(.monotonic);
+            while (true) {
+                const next: u64 = @bitCast(@as(f64, @bitCast(cur)) + value);
+                if (self.sum_bits.cmpxchgWeak(cur, next, .monotonic, .monotonic)) |actual| {
+                    cur = actual;
+                } else break;
+            }
+            // Store non-cumulatively in the first bucket whose bound covers the
+            // value; the cumulative sum is formed at render time.
+            inline for (upper_bounds, 0..) |b, i| {
+                if (value <= b) {
+                    _ = self.buckets[i].fetchAdd(1, .monotonic);
+                    return;
+                }
+            }
+            _ = self.inf_count.fetchAdd(1, .monotonic);
+        }
+
+        pub fn count(self: *const Self) u64 {
+            return self.total.load(.monotonic);
+        }
+
+        pub fn sum(self: *const Self) f64 {
+            return @bitCast(self.sum_bits.load(.monotonic));
+        }
+
+        /// Emit the `# TYPE`, cumulative `_bucket{le=...}` lines (including
+        /// `+Inf`), `_sum` and `_count` for this histogram under `name`.
+        pub fn writePrometheus(self: *const Self, name: []const u8, writer: anytype) !void {
+            try writer.print("# TYPE {s} histogram\n", .{name});
+            var cumulative: u64 = 0;
+            inline for (upper_bounds, 0..) |b, i| {
+                cumulative += self.buckets[i].load(.monotonic);
+                try writer.print("{s}_bucket{{le=\"{d}\"}} {d}\n", .{ name, b, cumulative });
+            }
+            cumulative += self.inf_count.load(.monotonic);
+            try writer.print("{s}_bucket{{le=\"+Inf\"}} {d}\n", .{ name, cumulative });
+            try writer.print("{s}_sum {d}\n", .{ name, self.sum() });
+            try writer.print("{s}_count {d}\n", .{ name, cumulative });
+        }
+    };
+}
 
 /// A registry of named metrics.
 pub fn Registry(comptime max_metrics: usize) type {
@@ -225,6 +308,54 @@ test "Histogram single observation" {
     try std.testing.expectEqual(@as(f64, 42.0), h.min);
     try std.testing.expectEqual(@as(f64, 42.0), h.max);
     try std.testing.expectEqual(@as(f64, 42.0), h.mean());
+}
+
+test "Counter is safe under concurrent increments" {
+    var c: Counter = .{};
+    const Worker = struct {
+        fn run(counter: *Counter) void {
+            for (0..10_000) |_| counter.inc();
+        }
+    };
+    var threads: [4]std.Thread = undefined;
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Worker.run, .{&c});
+    for (threads) |t| t.join();
+    // Without atomics this would lose updates to the read-modify-write race.
+    try std.testing.expectEqual(@as(u64, 40_000), c.get());
+}
+
+test "Gauge atomic set and rmw" {
+    var g: Gauge = .{};
+    try std.testing.expectEqual(@as(f64, 0), g.get());
+    g.set(42.5);
+    try std.testing.expectEqual(@as(f64, 42.5), g.get());
+    g.add(7.5);
+    try std.testing.expectEqual(@as(f64, 50.0), g.get());
+    g.sub(10.0);
+    try std.testing.expectEqual(@as(f64, 40.0), g.get());
+    g.dec();
+    try std.testing.expectEqual(@as(f64, 39.0), g.get());
+}
+
+test "BucketedHistogram emits cumulative Prometheus buckets" {
+    const H = BucketedHistogram(&.{ 1, 5, 10 });
+    var h: H = .{};
+    h.observe(0.5); // le=1
+    h.observe(3); // le=5
+    h.observe(50); // +Inf
+    try std.testing.expectEqual(@as(u64, 3), h.count());
+    try std.testing.expectApproxEqAbs(@as(f64, 53.5), h.sum(), 0.001);
+
+    var buf: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    try h.writePrometheus("lat", &writer);
+    const out = writer.buffered();
+    // cumulative: le=1 -> 1, le=5 -> 2, le=10 -> 2, +Inf -> 3
+    try std.testing.expect(std.mem.indexOf(u8, out, "lat_bucket{le=\"1\"} 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "lat_bucket{le=\"5\"} 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "lat_bucket{le=\"10\"} 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "lat_bucket{le=\"+Inf\"} 3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "lat_count 3") != null);
 }
 
 test "Registry stores named counters" {
