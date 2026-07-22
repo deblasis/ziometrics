@@ -8,6 +8,8 @@ const std = @import("std");
 /// A monotonically increasing counter. Thread-safe: increments are atomic, so
 /// concurrent handlers scraping the same counter cannot lose updates.
 pub const Counter = struct {
+    /// The current count, stored in an atomic word so concurrent increments
+    /// compose without a lock. Read it through `get`, not directly.
     value: std.atomic.Value(u64) = .{ .raw = 0 },
 
     /// Increment by 1.
@@ -35,12 +37,16 @@ pub const Counter = struct {
 /// pattern in an atomic word, so set/get are lock-free and add/sub use a
 /// compare-and-swap loop rather than a racy read-modify-write.
 pub const Gauge = struct {
+    /// The current value held as the bit pattern of an f64 in an atomic word.
+    /// Read it through `get`, which reinterprets the bits back into an f64.
     bits: std.atomic.Value(u64) = .{ .raw = 0 },
 
+    /// Set the gauge to an absolute value.
     pub fn set(self: *Gauge, v: f64) void {
         self.bits.store(@bitCast(v), .monotonic);
     }
 
+    /// Read-modify-write the stored f64 by `delta` via a compare-and-swap loop.
     fn rmw(self: *Gauge, delta: f64) void {
         var cur = self.bits.load(.monotonic);
         while (true) {
@@ -51,22 +57,27 @@ pub const Gauge = struct {
         }
     }
 
+    /// Increase the gauge by 1.
     pub fn inc(self: *Gauge) void {
         self.rmw(1);
     }
 
+    /// Decrease the gauge by 1.
     pub fn dec(self: *Gauge) void {
         self.rmw(-1);
     }
 
+    /// Increase the gauge by `v` (use a negative `v` to decrease).
     pub fn add(self: *Gauge, v: f64) void {
         self.rmw(v);
     }
 
+    /// Decrease the gauge by `v`.
     pub fn sub(self: *Gauge, v: f64) void {
         self.rmw(-v);
     }
 
+    /// Get the current value.
     pub fn get(self: *const Gauge) f64 {
         return @bitCast(self.bits.load(.monotonic));
     }
@@ -74,11 +85,17 @@ pub const Gauge = struct {
 
 /// A histogram for tracking value distributions.
 pub const Histogram = struct {
+    /// Number of observations recorded so far.
     count: u64 = 0,
+    /// Running sum of all observed values.
     sum: f64 = 0,
+    /// Smallest value observed. Seeded to `floatMax` so the first observation
+    /// always replaces it; reads `floatMax` while the histogram is empty.
     min: f64 = std.math.floatMax(f64),
+    /// Largest value observed. Zero while the histogram is empty.
     max: f64 = 0,
 
+    /// Record one value, updating count, sum, min, and max.
     pub fn observe(self: *Histogram, value: f64) void {
         self.count += 1;
         self.sum += value;
@@ -86,11 +103,13 @@ pub const Histogram = struct {
         if (value > self.max) self.max = value;
     }
 
+    /// Arithmetic mean of all observations, or 0 when none have been recorded.
     pub fn mean(self: *const Histogram) f64 {
         if (self.count == 0) return 0;
         return self.sum / @as(f64, @floatFromInt(self.count));
     }
 
+    /// Whether no observations have been recorded.
     pub fn isEmpty(self: *const Histogram) bool {
         return self.count == 0;
     }
@@ -108,6 +127,8 @@ pub const Histogram = struct {
 pub fn BucketedHistogram(comptime upper_bounds: []const f64) type {
     return struct {
         const Self = @This();
+        /// The ascending upper bounds this histogram was parameterized with,
+        /// exposed so callers can introspect the configured `le` cutoffs.
         pub const bounds = upper_bounds;
 
         comptime {
@@ -116,11 +137,19 @@ pub fn BucketedHistogram(comptime upper_bounds: []const f64) type {
             }
         }
 
+        /// Non-cumulative count per bound: `buckets[i]` holds observations that
+        /// fell into `upper_bounds[i]` but no smaller bound. Cumulative counts
+        /// are formed at render time by `writePrometheus`.
         buckets: [upper_bounds.len]std.atomic.Value(u64) = @splat(.{ .raw = 0 }),
+        /// Count of observations larger than the last bound (the `+Inf` bucket).
         inf_count: std.atomic.Value(u64) = .{ .raw = 0 },
+        /// Running sum of observed values, stored as f64 bits in an atomic word.
         sum_bits: std.atomic.Value(u64) = .{ .raw = 0 },
+        /// Total number of observations across all buckets.
         total: std.atomic.Value(u64) = .{ .raw = 0 },
 
+        /// Record one value: bump the total and sum, then the first bucket whose
+        /// bound covers it, or `+Inf` if it exceeds every bound.
         pub fn observe(self: *Self, value: f64) void {
             _ = self.total.fetchAdd(1, .monotonic);
             var cur = self.sum_bits.load(.monotonic);
@@ -141,10 +170,12 @@ pub fn BucketedHistogram(comptime upper_bounds: []const f64) type {
             _ = self.inf_count.fetchAdd(1, .monotonic);
         }
 
+        /// Total number of observations recorded.
         pub fn count(self: *const Self) u64 {
             return self.total.load(.monotonic);
         }
 
+        /// Running sum of all observed values.
         pub fn sum(self: *const Self) f64 {
             return @bitCast(self.sum_bits.load(.monotonic));
         }
@@ -169,18 +200,29 @@ pub fn BucketedHistogram(comptime upper_bounds: []const f64) type {
 /// A registry of named metrics.
 pub fn Registry(comptime max_metrics: usize) type {
     return struct {
+        /// Backing storage for registered counters, parallel to `counter_names`.
         counters: [max_metrics]?Counter = .{null} ** max_metrics,
+        /// Backing storage for registered gauges, parallel to `gauge_names`.
         gauges: [max_metrics]?Gauge = .{null} ** max_metrics,
+        /// Backing storage for registered histograms, parallel to `histogram_names`.
         histograms: [max_metrics]?Histogram = .{null} ** max_metrics,
+        /// Names of registered counters, indexed alongside `counters`.
         counter_names: [max_metrics][]const u8 = .{""} ** max_metrics,
+        /// Names of registered gauges, indexed alongside `gauges`.
         gauge_names: [max_metrics][]const u8 = .{""} ** max_metrics,
+        /// Names of registered histograms, indexed alongside `histograms`.
         histogram_names: [max_metrics][]const u8 = .{""} ** max_metrics,
+        /// Number of counters registered so far.
         counter_count: usize = 0,
+        /// Number of gauges registered so far.
         gauge_count: usize = 0,
+        /// Number of histograms registered so far.
         histogram_count: usize = 0,
 
         const Self = @This();
 
+        /// Get the counter named `name`, creating it on first use. Returns null
+        /// only when the registry is full and `name` is not already present.
         pub fn counter(self: *Self, name: []const u8) ?*Counter {
             for (self.counter_names[0..self.counter_count], 0..) |n, i| {
                 if (std.mem.eql(u8, n, name)) return &self.counters[i].?;
@@ -192,6 +234,8 @@ pub fn Registry(comptime max_metrics: usize) type {
             return &self.counters[self.counter_count - 1].?;
         }
 
+        /// Get the gauge named `name`, creating it on first use. Returns null
+        /// only when the registry is full and `name` is not already present.
         pub fn gauge(self: *Self, name: []const u8) ?*Gauge {
             for (self.gauge_names[0..self.gauge_count], 0..) |n, i| {
                 if (std.mem.eql(u8, n, name)) return &self.gauges[i].?;
@@ -203,6 +247,8 @@ pub fn Registry(comptime max_metrics: usize) type {
             return &self.gauges[self.gauge_count - 1].?;
         }
 
+        /// Get the histogram named `name`, creating it on first use. Returns null
+        /// only when the registry is full and `name` is not already present.
         pub fn histogram(self: *Self, name: []const u8) ?*Histogram {
             for (self.histogram_names[0..self.histogram_count], 0..) |n, i| {
                 if (std.mem.eql(u8, n, name)) return &self.histograms[i].?;
@@ -411,4 +457,93 @@ test "Registry writePrometheus" {
     try reg.writePrometheus(&writer);
     const output = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "requests") != null);
+}
+
+test "Gauge set overwrites previous value" {
+    var g: Gauge = .{};
+    g.set(10);
+    g.set(-3.5);
+    try std.testing.expectEqual(@as(f64, -3.5), g.get());
+}
+
+test "Registry gauge dedups by name" {
+    var reg: Registry(10) = .{};
+    const g1 = reg.gauge("cpu").?;
+    g1.set(50);
+    const g2 = reg.gauge("cpu").?;
+    try std.testing.expectEqual(@as(f64, 50), g2.get());
+    try std.testing.expectEqual(g1, g2);
+}
+
+test "Registry histogram dedups by name" {
+    var reg: Registry(10) = .{};
+    const h1 = reg.histogram("lat").?;
+    h1.observe(5);
+    const h2 = reg.histogram("lat").?;
+    h2.observe(15);
+    try std.testing.expectEqual(@as(u64, 2), h1.count);
+    try std.testing.expectEqual(h1, h2);
+}
+
+test "Registry returns null when full for gauges and histograms" {
+    var reg: Registry(1) = .{};
+    _ = reg.gauge("a");
+    try std.testing.expect(reg.gauge("b") == null);
+    var reg2: Registry(1) = .{};
+    _ = reg2.histogram("a");
+    try std.testing.expect(reg2.histogram("b") == null);
+}
+
+test "Registry writePrometheus emits gauge and histogram series" {
+    var reg: Registry(10) = .{};
+    reg.gauge("cpu").?.set(72.5);
+    const h = reg.histogram("lat").?;
+    h.observe(8);
+    h.observe(42);
+    var buf: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    try reg.writePrometheus(&writer);
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "# TYPE cpu gauge") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "cpu 72.5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "# TYPE lat histogram") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "lat_count 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "lat_sum 50") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "lat_min 8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "lat_max 42") != null);
+}
+
+test "BucketedHistogram exposes configured bounds" {
+    const H = BucketedHistogram(&.{ 1, 5, 10 });
+    try std.testing.expectEqual(@as(usize, 3), H.bounds.len);
+    try std.testing.expectEqual(@as(f64, 5), H.bounds[1]);
+}
+
+test "BucketedHistogram value equal to bound lands in that bucket" {
+    const H = BucketedHistogram(&.{ 1, 5, 10 });
+    var h: H = .{};
+    h.observe(5); // exactly le=5
+    try std.testing.expectEqual(@as(u64, 1), h.count());
+    var buf: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    try h.writePrometheus("x", &writer);
+    const out = writer.buffered();
+    // le=1 -> 0, le=5 -> 1 (cumulative)
+    try std.testing.expect(std.mem.indexOf(u8, out, "x_bucket{le=\"1\"} 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "x_bucket{le=\"5\"} 1") != null);
+}
+
+test "BucketedHistogram all observations above top bound go to +Inf" {
+    const H = BucketedHistogram(&.{ 1, 2 });
+    var h: H = .{};
+    h.observe(100);
+    h.observe(200);
+    try std.testing.expectEqual(@as(u64, 2), h.count());
+    try std.testing.expectApproxEqAbs(@as(f64, 300), h.sum(), 0.001);
+    var buf: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    try h.writePrometheus("y", &writer);
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "y_bucket{le=\"2\"} 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "y_bucket{le=\"+Inf\"} 2") != null);
 }
